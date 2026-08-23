@@ -1,15 +1,7 @@
 // ============================================================
 // GABU MTUMBA COLLECTION — STOCK SYSTEM CONFIG
 // ============================================================
-// Fill these in tonight when you have PC access. Nothing else
-// in the app needs to change once these are correct.
-//
-// FIREBASE: console.firebase.google.com -> your Pro Tipsters
-// project -> Project Settings -> General -> "Your apps" ->
-// Web app -> copy the firebaseConfig object values below.
-// (Reuses the same Firebase project as Pro Tipsters — safe,
-// see notes in project README.)
-//
+// FIREBASE: reusing the same Firebase project as Pro Tipsters.
 // CLOUDINARY: cloudinary.com dashboard -> Cloud Name (top of
 // page). Then Settings -> Upload -> "Upload presets" -> Add
 // upload preset -> set Signing Mode to "Unsigned" -> save ->
@@ -17,12 +9,12 @@
 // ============================================================
 
 export const firebaseConfig = {
-  apiKey: "TODO_PASTE_API_KEY",
-  authDomain: "TODO_PASTE_AUTH_DOMAIN",
-  projectId: "TODO_PASTE_PROJECT_ID",
-  storageBucket: "TODO_PASTE_STORAGE_BUCKET",
-  messagingSenderId: "TODO_PASTE_SENDER_ID",
-  appId: "TODO_PASTE_APP_ID"
+  apiKey: "AIzaSyAM8rbDtHmITlTF9ucEjbYuoyAiqB8UuZo",
+  authDomain: "pro-tipsters-94171.firebaseapp.com",
+  projectId: "pro-tipsters-94171",
+  storageBucket: "pro-tipsters-94171.firebasestorage.app",
+  messagingSenderId: "737923794509",
+  appId: "1:737923794509:web:921f6a558c11786beebe04"
 };
 
 export const cloudinaryConfig = {
