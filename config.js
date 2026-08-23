@@ -1,12 +1,6 @@
 // ============================================================
 // GABU MTUMBA COLLECTION — STOCK SYSTEM CONFIG
 // ============================================================
-// FIREBASE: reusing the same Firebase project as Pro Tipsters.
-// CLOUDINARY: cloudinary.com dashboard -> Cloud Name (top of
-// page). Then Settings -> Upload -> "Upload presets" -> Add
-// upload preset -> set Signing Mode to "Unsigned" -> save ->
-// copy the preset name below.
-// ============================================================
 
 export const firebaseConfig = {
   apiKey: "AIzaSyAM8rbDtHmITlTF9ucEjbYuoyAiqB8UuZo",
@@ -18,8 +12,8 @@ export const firebaseConfig = {
 };
 
 export const cloudinaryConfig = {
-  cloudName: "TODO_PASTE_CLOUD_NAME",
-  uploadPreset: "TODO_PASTE_UNSIGNED_PRESET_NAME"
+  cloudName: "pzroy4hz",
+  uploadPreset: "gabu_shoes"
 };
 
 // Shop identity — used across the UI
