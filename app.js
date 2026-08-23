@@ -613,7 +613,9 @@ async function loadStaffList() {
   let rows = "";
   snap.forEach(d => {
     const u = d.data();
-    if (u.role === "owner") return;
+    // Skip anyone without a Gabu Stock role (e.g. Pro Tipsters accounts
+    // living in the same shared users collection) and skip the owner.
+    if (!u.role || u.role === "owner") return;
     const isEditor = u.role === "editor";
     rows += `
       <div class="ledger-row">
