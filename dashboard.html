@@ -1,0 +1,37 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0" />
+<title>Gabu Mtumba Collection — Dashboard</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@500;600;700&family=Inter:wght@400;500;600;700&family=DM+Mono:wght@400;500&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="style.css" />
+</head>
+<body>
+
+<div class="screen">
+  <div class="topbar">
+    <div class="brand"><span class="dot"></span> Gabu Stock</div>
+    <div class="who">
+      <div id="who-name">—</div>
+      <div id="who-role" class="mono" style="opacity:0.8;"></div>
+    </div>
+  </div>
+
+  <div class="content" id="content">
+    <div class="loading-dots">Loading…</div>
+  </div>
+
+  <div class="tabbar" id="tabbar">
+    <button data-tab="overview" class="active"><span class="icon">🏠</span>Overview</button>
+    <button data-tab="shoes"><span class="icon">👟</span>Shoes</button>
+    <button data-tab="stock"><span class="icon">🧥</span>Capes/Bags</button>
+    <button data-tab="variance"><span class="icon">⚖️</span>Variance</button>
+    <button data-tab="settings"><span class="icon">⚙️</span>More</button>
+  </div>
+</div>
+
+<script type="module" src="app.js"></script>
+</body>
+</html>
