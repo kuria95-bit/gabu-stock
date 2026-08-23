@@ -1,0 +1,88 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0" />
+<title>Gabu Mtumba Collection — Stock System</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@500;600;700&family=Inter:wght@400;500;600;700&family=DM+Mono:wght@400;500&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="style.css" />
+</head>
+<body>
+
+<div class="login-wrap">
+  <div class="login-card">
+    <div class="dot-row"><span></span><span></span><span></span></div>
+    <h1>Gabu Mtumba Collection</h1>
+    <p class="muted" style="margin-top:0;">Stock &amp; sales tracker</p>
+
+    <form id="login-form" style="text-align:left; margin-top:10px;">
+      <label for="phone">Phone number</label>
+      <input type="tel" id="phone" placeholder="07XXXXXXXX" required autocomplete="username" />
+
+      <label for="password">Password</label>
+      <input type="password" id="password" placeholder="••••••••" required autocomplete="current-password" />
+
+      <div class="spacer"></div>
+      <button type="submit" class="btn btn-primary" id="login-btn">Log in</button>
+      <div class="error-msg" id="error-msg"></div>
+    </form>
+  </div>
+</div>
+
+<script type="module">
+  import { firebaseConfig } from "./config.js";
+  import { initializeApp } from "https://www.gstatic.com/firebasejs/10.13.0/firebase-app.js";
+  import {
+    getAuth, signInWithEmailAndPassword
+  } from "https://www.gstatic.com/firebasejs/10.13.0/firebase-auth.js";
+  import {
+    getFirestore, doc, getDoc
+  } from "https://www.gstatic.com/firebasejs/10.13.0/firebase-firestore.js";
+
+  const app = initializeApp(firebaseConfig);
+  const auth = getAuth(app);
+  const db = getFirestore(app);
+
+  // We store staff with phone-number-formatted emails, same pattern
+  // as Pro Tipsters: 07XXXXXXXX -> 07XXXXXXXX@gabu.local
+  function phoneToEmail(phone) {
+    const digits = phone.replace(/\s+/g, "");
+    return `${digits}@gabu.local`;
+  }
+
+  const form = document.getElementById("login-form");
+  const errorMsg = document.getElementById("error-msg");
+  const loginBtn = document.getElementById("login-btn");
+
+  form.addEventListener("submit", async (e) => {
+    e.preventDefault();
+    errorMsg.textContent = "";
+    loginBtn.disabled = true;
+    loginBtn.textContent = "Logging in...";
+
+    const phone = document.getElementById("phone").value.trim();
+    const password = document.getElementById("password").value;
+    const email = phoneToEmail(phone);
+
+    try {
+      const cred = await signInWithEmailAndPassword(auth, email, password);
+      // confirm they have a profile doc before letting them in
+      const profileSnap = await getDoc(doc(db, "users", cred.user.uid));
+      if (!profileSnap.exists()) {
+        errorMsg.textContent = "No profile set up for this account yet. Ask the shop owner.";
+        loginBtn.disabled = false;
+        loginBtn.textContent = "Log in";
+        return;
+      }
+      window.location.href = "dashboard.html";
+    } catch (err) {
+      errorMsg.textContent = "Wrong number or password. Try again.";
+      loginBtn.disabled = false;
+      loginBtn.textContent = "Log in";
+    }
+  });
+</script>
+
+</body>
+</html>
