@@ -428,4 +428,244 @@ function openSellShoeModal(shoeId) {
       <div class="modal-head"><h2>Size ${shoe.size}</h2>
         <button class="modal-close" id="close-modal">✕</button></div>
       <img class="photo" src="${shoe.imageUrl}" style="width:100%; border-radius:8px;" />
-      <p class="muted">Asking range: Ksh ${shoe.priceMin}–${shoe.pri
+      <p class="muted">Asking range: Ksh ${shoe.priceMin}–${shoe.priceMax}</p>
+    `);
+    document.getElementById("close-modal").addEventListener("click", closeModal);
+    return;
+  }
+
+  openModal(`
+    <div class="modal-head"><h2>Sell — Size ${shoe.size}</h2>
+      <button class="modal-close" id="close-modal">✕</button></div>
+    <img class="photo" src="${shoe.imageUrl}" style="width:100%; border-radius:8px;" />
+    <p class="muted">Asking range: Ksh ${shoe.priceMin}–${shoe.priceMax}</p>
+    <form id="sell-shoe-form">
+      <label for="sold-price">Price you sold it for (Ksh)</label>
+      <input type="number" id="sold-price" placeholder="e.g. 1600" required />
+      <div class="spacer"></div>
+      <button type="submit" class="btn btn-primary">Mark as sold</button>
+    </form>
+  `);
+
+  document.getElementById("close-modal").addEventListener("click", closeModal);
+  document.getElementById("sell-shoe-form").addEventListener("submit", async (e) => {
+    e.preventDefault();
+    const soldPrice = Number(document.getElementById("sold-price").value);
+    await updateDoc(doc(db, "shoes", shoeId), {
+      status: "sold",
+      soldPrice,
+      dateSold: serverTimestamp(),
+      soldBy: currentUser.uid
+    });
+    await logTransaction({ type: "sale", category: "shoe", subtype: shoe.size, qty: 1, price: soldPrice, shoeId });
+    toast(`Sold for Ksh ${soldPrice}`);
+    closeModal();
+  });
+}
+
+async function uploadToCloudinary(file) {
+  const formData = new FormData();
+  formData.append("file", file);
+  formData.append("upload_preset", cloudinaryConfig.uploadPreset);
+  const res = await fetch(`https://api.cloudinary.com/v1_1/${cloudinaryConfig.cloudName}/image/upload`, {
+    method: "POST",
+    body: formData
+  });
+  if (!res.ok) throw new Error("Cloudinary upload failed");
+  const data = await res.json();
+  return data.secure_url;
+}
+
+// ============================================================
+// CAPES & HANDBAGS (bulk count stock)
+// ============================================================
+
+function renderStock() {
+  contentEl.innerHTML = `
+    <div class="eyebrow">Bulk-count stock</div>
+    <h1>Capes &amp; Handbags</h1>
+    <p class="muted">Tap + or − to sell or restock. Every change is logged.</p>
+
+    <h3 style="margin-top:16px;">Capes</h3>
+    <div id="capes-rows"></div>
+
+    <h3 style="margin-top:16px;">Handbags</h3>
+    <div id="handbags-rows"></div>
+  `;
+
+  const capesBox = document.getElementById("capes-rows");
+  capesBox.innerHTML = CAPE_TYPES.map(t => stockRowHtml("capes", t.key, t.label, capesStock[t.key] || 0)).join("");
+
+  const bagsBox = document.getElementById("handbags-rows");
+  bagsBox.innerHTML = HANDBAG_TYPES.map(t => stockRowHtml("handbags", t.key, t.label, handbagsStock[t.key] || 0)).join("");
+
+  contentEl.querySelectorAll("[data-action]").forEach(btn => {
+    btn.addEventListener("click", () => handleStockAdjust(btn.dataset.category, btn.dataset.subtype, btn.dataset.action));
+  });
+}
+
+function stockRowHtml(category, subtype, label, count) {
+  return `
+    <div class="ledger-row">
+      <div class="label">${label}</div>
+      <div class="count-controls">
+        ${canEdit() ? `<button data-action="dec" data-category="${category}" data-subtype="${subtype}">−</button>` : ""}
+        <div class="count">${count}</div>
+        ${canEdit() ? `<button data-action="inc" data-category="${category}" data-subtype="${subtype}">+</button>` : ""}
+      </div>
+    </div>
+  `;
+}
+
+async function handleStockAdjust(category, subtype, action) {
+  const currentVal = category === "capes" ? capesStock[subtype] : handbagsStock[subtype];
+
+  if (action === "dec") {
+    if ((currentVal || 0) <= 0) { toast("Already at zero"); return; }
+    const typeList = category === "capes" ? CAPE_TYPES : HANDBAG_TYPES;
+    const known = typeList.find(t => t.key === subtype)?.price;
+    let price = window.prompt(
+      `Price sold for (Ksh):`,
+      known != null ? String(known) : ""
+    );
+    if (price === null) return; // cancelled
+    price = price ? Number(price) : 0;
+    await updateDoc(doc(db, "stock", category), { [subtype]: increment(-1) });
+    await logTransaction({ type: "sale", category, subtype, qty: 1, price });
+    toast("Recorded as sold");
+  } else {
+    const qtyStr = window.prompt("How many are you restocking?", "1");
+    const qty = Number(qtyStr);
+    if (!qty || qty <= 0) return;
+    await updateDoc(doc(db, "stock", category), { [subtype]: increment(qty) });
+    await logTransaction({ type: "restock", category, subtype, qty });
+    toast(`Restocked +${qty}`);
+  }
+}
+
+// ============================================================
+// VARIANCE CHECK
+// ============================================================
+
+function renderVariance() {
+  const inStockShoes = shoesCache.filter(s => s.status === "in_stock").length;
+
+  contentEl.innerHTML = `
+    <div class="eyebrow">Physical count vs system</div>
+    <h1>Variance check</h1>
+    <p class="muted">Count what's actually on the shelf, enter it below, and I'll flag any mismatch.</p>
+    <div id="variance-list"></div>
+  `;
+
+  const items = [
+    { category: "shoe", subtype: "all", label: "Shoes (all sizes)", expected: inStockShoes },
+    ...CAPE_TYPES.map(t => ({ category: "capes", subtype: t.key, label: t.label, expected: capesStock[t.key] || 0 })),
+    ...HANDBAG_TYPES.map(t => ({ category: "handbags", subtype: t.key, label: t.label, expected: handbagsStock[t.key] || 0 }))
+  ];
+
+  const list = document.getElementById("variance-list");
+  list.innerHTML = items.map(item => `
+    <div class="card">
+      <div class="label">${item.label}</div>
+      <div class="muted mono">System says: ${item.expected}</div>
+      <div class="row" style="margin-top:8px;">
+        <input type="number" placeholder="Actual count" id="count-${item.category}-${item.subtype}" />
+        <button class="btn btn-outline btn-sm" data-check="${item.category}|${item.subtype}|${item.expected}|${item.label}">Check</button>
+      </div>
+      <div id="result-${item.category}-${item.subtype}"></div>
+    </div>
+  `).join("");
+
+  list.querySelectorAll("[data-check]").forEach(btn => {
+    btn.addEventListener("click", () => {
+      const [category, subtype, expected, label] = btn.dataset.check.split("|");
+      runVarianceCheck(category, subtype, Number(expected), label);
+    });
+  });
+}
+
+async function runVarianceCheck(category, subtype, expected, label) {
+  const input = document.getElementById(`count-${category}-${subtype}`);
+  const actual = Number(input.value);
+  const resultBox = document.getElementById(`result-${category}-${subtype}`);
+  if (input.value === "") { toast("Enter the actual count first"); return; }
+
+  const diff = actual - expected;
+
+  await addDoc(collection(db, "variance_checks"), {
+    category, subtype, expected, actual, diff,
+    checkedBy: currentUser.uid, checkedByName: profile.name,
+    timestamp: serverTimestamp()
+  });
+
+  if (diff === 0) {
+    resultBox.innerHTML = `<div class="alert alert-good">Matches — no variance.</div>`;
+  } else {
+    const direction = diff > 0 ? "more than expected" : "missing";
+    resultBox.innerHTML = `
+      <div class="alert alert-danger">
+        ${Math.abs(diff)} ${label} ${direction}. Flagged for review.
+        ${isOwner() && category !== "shoe" ? `<button class="btn btn-danger btn-sm" style="margin-top:8px;" id="reconcile-${category}-${subtype}">Update system to match count</button>` : ""}
+      </div>`;
+    document.getElementById(`reconcile-${category}-${subtype}`)?.addEventListener("click", async () => {
+      await updateDoc(doc(db, "stock", category), { [subtype]: actual });
+      await logTransaction({ type: "variance_adjustment", category, subtype, qty: diff, note: `Adjusted ${expected} -> ${actual}` });
+      toast("Stock count updated");
+      resultBox.innerHTML = `<div class="alert alert-good">Updated to ${actual}.</div>`;
+    });
+  }
+}
+
+// ============================================================
+// SETTINGS / MORE
+// ============================================================
+
+function renderSettings() {
+  contentEl.innerHTML = `
+    <div class="eyebrow">Account</div>
+    <h1>More</h1>
+    <div class="card">
+      <div class="label">${profile.name}</div>
+      <div class="muted mono">${profile.role.toUpperCase()}</div>
+    </div>
+    ${isOwner() ? `<h2 style="margin-top:16px;">Staff permissions</h2><div id="staff-list"><div class="loading-dots">Loading…</div></div>` : ""}
+    <button class="btn btn-outline" id="logout-btn" style="margin-top:20px;">Log out</button>
+  `;
+
+  document.getElementById("logout-btn").addEventListener("click", async () => {
+    await signOut(auth);
+    window.location.href = "index.html";
+  });
+
+  if (isOwner()) loadStaffList();
+}
+
+async function loadStaffList() {
+  const snap = await getDocs(collection(db, "users"));
+  const box = document.getElementById("staff-list");
+  let rows = "";
+  snap.forEach(d => {
+    const u = d.data();
+    // Skip anyone without a Gabu Stock role (e.g. Pro Tipsters accounts
+    // living in the same shared users collection) and skip the owner.
+    if (!u.role || u.role === "owner") return;
+    const isEditor = u.role === "editor";
+    rows += `
+      <div class="ledger-row">
+        <div class="label">${u.name}</div>
+        <button class="btn btn-sm ${isEditor ? "btn-primary" : "btn-outline"}" data-uid="${d.id}" data-role="${u.role}">
+          ${isEditor ? "Editor (tap to make viewer)" : "Viewer (tap to allow edits)"}
+        </button>
+      </div>`;
+  });
+  box.innerHTML = rows || `<p class="muted">No other staff accounts yet.</p>`;
+
+  box.querySelectorAll("[data-uid]").forEach(btn => {
+    btn.addEventListener("click", async () => {
+      const newRole = btn.dataset.role === "editor" ? "viewer" : "editor";
+      await updateDoc(doc(db, "users", btn.dataset.uid), { role: newRole });
+      toast(`Access updated to ${newRole}`);
+      loadStaffList();
+    });
+  });
+}
