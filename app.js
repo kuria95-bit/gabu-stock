@@ -40,11 +40,11 @@ try {
 // ---------- Constants ----------
 
 const CAPE_TYPES = [
-  { key: "normal", label: "Normal capes" },
-  { key: "standing", label: "Standing capes" },
-  { key: "round", label: "Round standing" }
+  { key: "normal", label: "Normal capes", price: 300 },
+  { key: "standing", label: "Standing capes", price: 350 },
+  { key: "round", label: "Round standing", price: 400 }
 ];
-const HANDBAG_TYPES = [{ key: "total", label: "Handbags" }];
+const HANDBAG_TYPES = [{ key: "total", label: "Handbags", price: null }];
 
 // ---------- Global state ----------
 
@@ -230,7 +230,10 @@ async function loadTodaySales() {
           <div class="label">${categoryLabel(t.category, t.subtype)}</div>
           <div class="muted mono">Ksh ${t.price || 0} · ${t.byName || "—"}</div>
         </div>
-        <div class="mono">${t.qty || 1}x</div>
+        <div style="display:flex; align-items:center; gap:10px;">
+          <div class="mono">${t.qty || 1}x</div>
+          ${canEdit() ? `<button class="btn btn-outline btn-sm" data-undo-id="${d.id}">Undo</button>` : ""}
+        </div>
       </div>`;
   });
 
@@ -238,6 +241,32 @@ async function loadTodaySales() {
     <div class="alert alert-good">Ksh ${total.toLocaleString()} sold so far today</div>
     ${rows}
   `;
+
+  box.querySelectorAll("[data-undo-id]").forEach(btn => {
+    btn.addEventListener("click", () => undoSale(btn.dataset.undoId));
+  });
+}
+
+async function undoSale(txId) {
+  const ok = window.confirm("Undo this sale? This puts the item back in stock and removes it from today's sales.");
+  if (!ok) return;
+
+  const txSnap = await getDoc(doc(db, "transactions", txId));
+  if (!txSnap.exists()) { toast("Already removed"); return; }
+  const t = txSnap.data();
+
+  try {
+    if (t.category === "shoe" && t.shoeId) {
+      await updateDoc(doc(db, "shoes", t.shoeId), { status: "in_stock" });
+    } else if (t.category === "capes" || t.category === "handbags") {
+      await updateDoc(doc(db, "stock", t.category), { [t.subtype]: increment(t.qty || 1) });
+    }
+    await deleteDoc(doc(db, "transactions", txId));
+    toast("Sale undone");
+    loadTodaySales();
+  } catch (err) {
+    toast("Couldn't undo: " + err.message);
+  }
 }
 
 function categoryLabel(category, subtype) {
@@ -492,11 +521,14 @@ async function handleStockAdjust(category, subtype, action) {
 
   if (action === "dec") {
     if ((currentVal || 0) <= 0) { toast("Already at zero"); return; }
-    let price = null;
-    if (category === "capes" || category === "handbags") {
-      price = window.prompt(`Price sold for (Ksh) — leave blank if unknown:`);
-      price = price ? Number(price) : 0;
-    }
+    const typeList = category === "capes" ? CAPE_TYPES : HANDBAG_TYPES;
+    const known = typeList.find(t => t.key === subtype)?.price;
+    let price = window.prompt(
+      `Price sold for (Ksh):`,
+      known != null ? String(known) : ""
+    );
+    if (price === null) return; // cancelled
+    price = price ? Number(price) : 0;
     await updateDoc(doc(db, "stock", category), { [subtype]: increment(-1) });
     await logTransaction({ type: "sale", category, subtype, qty: 1, price });
     toast("Recorded as sold");
