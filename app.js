@@ -123,6 +123,7 @@ function render() {
   else if (activeTab === "shoes") renderShoes();
   else if (activeTab === "stock") renderStock();
   else if (activeTab === "variance") renderVariance();
+  else if (activeTab === "money") renderMoney();
   else if (activeTab === "settings") renderSettings();
 }
 
@@ -631,6 +632,195 @@ async function runVarianceCheck(category, subtype, expected, label) {
       resultBox.innerHTML = `<div class="alert alert-good">Updated to ${actual}.</div>`;
     });
   }
+}
+
+// ============================================================
+// MONEY — expenses, wages owed, and a 7-day sales chart
+// ============================================================
+
+let revenueChartInstance = null;
+
+async function renderMoney() {
+  contentEl.innerHTML = `
+    <div class="eyebrow">Business overview</div>
+    <h1>Money</h1>
+    <p class="muted">Revenue trend, shop expenses, and wages owed.</p>
+
+    <h3 style="margin-top:16px;">Last 7 days — sales revenue</h3>
+    <div class="card">
+      <canvas id="revenue-chart" height="180"></canvas>
+    </div>
+
+    <h3 style="margin-top:16px;">Wages</h3>
+    <div class="card" id="wages-card"><div class="loading-dots">Loading…</div></div>
+
+    <h3 style="margin-top:16px;">Expenses</h3>
+    <div class="card">
+      ${canEdit() ? `
+        <label for="exp-desc">What was it for?</label>
+        <input type="text" id="exp-desc" placeholder="e.g. Soap, transport" />
+        <label for="exp-amount">Amount (Ksh)</label>
+        <input type="number" id="exp-amount" placeholder="e.g. 100" />
+        <div class="spacer"></div>
+        <button class="btn btn-primary" id="add-expense-btn">Add expense</button>
+      ` : ""}
+    </div>
+    <div id="expenses-list"><div class="loading-dots">Loading…</div></div>
+  `;
+
+  document.getElementById("add-expense-btn")?.addEventListener("click", addExpense);
+  loadRevenueChart();
+  loadWages();
+  loadExpenses();
+}
+
+async function loadRevenueChart() {
+  const days = [];
+  for (let i = 6; i >= 0; i--) {
+    const d = new Date();
+    d.setHours(0, 0, 0, 0);
+    d.setDate(d.getDate() - i);
+    days.push(d);
+  }
+  const start = days[0];
+  const end = new Date();
+  end.setHours(23, 59, 59, 999);
+
+  const q = query(
+    collection(db, "transactions"),
+    where("type", "==", "sale"),
+    where("timestamp", ">=", Timestamp.fromDate(start)),
+    where("timestamp", "<=", Timestamp.fromDate(end)),
+    orderBy("timestamp", "asc")
+  );
+  const snap = await getDocs(q);
+
+  const totals = days.map(() => 0);
+  snap.forEach(docSnap => {
+    const t = docSnap.data();
+    if (!t.timestamp) return;
+    const ts = t.timestamp.toDate();
+    for (let i = 0; i < days.length; i++) {
+      const dayEnd = new Date(days[i]);
+      dayEnd.setHours(23, 59, 59, 999);
+      if (ts >= days[i] && ts <= dayEnd) {
+        totals[i] += t.price || 0;
+        break;
+      }
+    }
+  });
+
+  const labels = days.map(d => d.toLocaleDateString(undefined, { weekday: "short", day: "numeric" }));
+  const canvas = document.getElementById("revenue-chart");
+  if (!canvas || typeof Chart === "undefined") return;
+
+  if (revenueChartInstance) revenueChartInstance.destroy();
+  revenueChartInstance = new Chart(canvas, {
+    type: "bar",
+    data: {
+      labels,
+      datasets: [{
+        label: "Revenue (Ksh)",
+        data: totals,
+        backgroundColor: "#2F5233",
+        borderRadius: 4
+      }]
+    },
+    options: {
+      plugins: { legend: { display: false } },
+      scales: { y: { beginAtZero: true } }
+    }
+  });
+}
+
+async function loadWages() {
+  const box = document.getElementById("wages-card");
+  const snap = await getDocs(query(collection(db, "wage_entries"), orderBy("timestamp", "desc")));
+  let owed = 0;
+  let rows = "";
+  let count = 0;
+  snap.forEach(d => {
+    const w = d.data();
+    owed += (w.amount || 0) - (w.paidAmount || 0);
+    if (count < 10) {
+      const dateStr = w.timestamp ? w.timestamp.toDate().toLocaleDateString() : "";
+      rows += `
+        <div class="ledger-row">
+          <div class="label">${dateStr}</div>
+          <div class="mono">Ksh ${w.paidAmount || 0} / ${w.amount || 0}</div>
+        </div>`;
+      count++;
+    }
+  });
+
+  box.innerHTML = `
+    <div class="alert ${owed > 0 ? "alert-danger" : "alert-good"} mono">
+      ${owed > 0 ? `Ksh ${owed.toLocaleString()} owed to you` : "All caught up — nothing owed"}
+    </div>
+    ${canEdit() ? `<button class="btn btn-outline btn-sm" id="log-wage-btn" style="margin-top:8px;">Log today's wage</button>` : ""}
+    <div style="margin-top:10px;">${rows || `<p class="muted">No wage entries yet.</p>`}</div>
+  `;
+
+  document.getElementById("log-wage-btn")?.addEventListener("click", logWage);
+}
+
+async function logWage() {
+  const amountStr = window.prompt("How much of today's Ksh 300 wage was paid? (0-300)", "300");
+  if (amountStr === null) return;
+  const paidAmount = Math.max(0, Math.min(300, Number(amountStr) || 0));
+  await addDoc(collection(db, "wage_entries"), {
+    amount: 300,
+    paidAmount,
+    timestamp: serverTimestamp(),
+    loggedBy: currentUser.uid
+  });
+  toast(paidAmount >= 300 ? "Marked as fully paid" : `Logged Ksh ${paidAmount} paid`);
+  loadWages();
+}
+
+async function loadExpenses() {
+  const box = document.getElementById("expenses-list");
+  const snap = await getDocs(query(collection(db, "expenses"), orderBy("timestamp", "desc"), limit(20)));
+  let total = 0;
+  let rows = "";
+  snap.forEach(d => {
+    const e = d.data();
+    total += e.amount || 0;
+    const dateStr = e.timestamp ? e.timestamp.toDate().toLocaleDateString() : "";
+    rows += `
+      <div class="ledger-row">
+        <div>
+          <div class="label">${e.description || "Expense"}</div>
+          <div class="muted mono">${dateStr} · ${e.byName || "—"}</div>
+        </div>
+        <div class="mono">Ksh ${e.amount || 0}</div>
+      </div>`;
+  });
+
+  box.innerHTML = `
+    <div class="alert alert-info mono">Ksh ${total.toLocaleString()} spent (last 20 entries)</div>
+    ${rows || `<p class="muted">No expenses logged yet.</p>`}
+  `;
+}
+
+async function addExpense() {
+  const descEl = document.getElementById("exp-desc");
+  const amtEl = document.getElementById("exp-amount");
+  const description = descEl.value.trim();
+  const amount = Number(amtEl.value);
+  if (!description || !amount) { toast("Enter what it was for and the amount"); return; }
+
+  await addDoc(collection(db, "expenses"), {
+    description,
+    amount,
+    timestamp: serverTimestamp(),
+    by: currentUser.uid,
+    byName: profile.name
+  });
+  descEl.value = "";
+  amtEl.value = "";
+  toast("Expense added");
+  loadExpenses();
 }
 
 // ============================================================
