@@ -546,7 +546,7 @@ async function handleStockAdjust(category, subtype, action) {
       `Price sold for (Ksh):`,
       known != null ? String(known) : ""
     );
-    if (price === null) return; // cancelled
+    if (price === null) return;
     price = price ? Number(price) : 0;
     await updateDoc(doc(db, "stock", category), { [subtype]: increment(-1) });
     await logTransaction({ type: "sale", category, subtype, qty: 1, price });
@@ -869,8 +869,6 @@ async function loadStaffList() {
   let rows = "";
   snap.forEach(d => {
     const u = d.data();
-    // Skip anyone without a Gabu Stock role (e.g. Pro Tipsters accounts
-    // living in the same shared users collection) and skip the owner.
     if (!u.role || u.role === "owner") return;
     const isEditor = u.role === "editor";
     rows += `
