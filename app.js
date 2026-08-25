@@ -278,11 +278,19 @@ function categoryLabel(category, subtype) {
 }
 
 async function showEndOfDay() {
-  const startOfDay = new Date();
+  await showSalesForDate(new Date());
+}
+
+async function showSalesForDate(dateObj) {
+  const startOfDay = new Date(dateObj);
   startOfDay.setHours(0, 0, 0, 0);
+  const endOfDay = new Date(dateObj);
+  endOfDay.setHours(23, 59, 59, 999);
+
   const q = query(
     collection(db, "transactions"),
     where("timestamp", ">=", Timestamp.fromDate(startOfDay)),
+    where("timestamp", "<=", Timestamp.fromDate(endOfDay)),
     orderBy("timestamp", "desc")
   );
   const snap = await getDocs(q);
@@ -303,14 +311,14 @@ async function showEndOfDay() {
 
   const breakdownHtml = Object.entries(byCategory).map(([k, v]) =>
     `<div class="ledger-row"><div class="label">${k}</div><div class="mono">${v} sold</div></div>`
-  ).join("") || `<p class="muted">No sales yet today.</p>`;
+  ).join("") || `<p class="muted">No sales that day.</p>`;
 
   openModal(`
-    <div class="modal-head"><h2>End of day — ${new Date().toLocaleDateString()}</h2>
+    <div class="modal-head"><h2>${startOfDay.toLocaleDateString()}</h2>
       <button class="modal-close" onclick="document.getElementById('modal-overlay').remove()">✕</button></div>
     <div class="alert alert-good mono">Ksh ${revenue.toLocaleString()} total revenue · ${sales} items sold</div>
     ${breakdownHtml}
-    <p class="muted" style="margin-top:10px;">${restocks} item(s) restocked today.</p>
+    <p class="muted" style="margin-top:10px;">${restocks} item(s) restocked that day.</p>
   `);
 }
 
@@ -445,9 +453,18 @@ function openSellShoeModal(shoeId) {
       <div class="spacer"></div>
       <button type="submit" class="btn btn-primary">Mark as sold</button>
     </form>
+    <div class="spacer"></div>
+    <button class="btn btn-outline" id="remove-shoe-btn" style="border-color:var(--red); color:var(--red);">Remove listing (duplicate / mistake)</button>
   `);
 
   document.getElementById("close-modal").addEventListener("click", closeModal);
+  document.getElementById("remove-shoe-btn").addEventListener("click", async () => {
+    const ok = window.confirm("Remove this shoe listing? Use this only for duplicates or mistakes — not for sales.");
+    if (!ok) return;
+    await deleteDoc(doc(db, "shoes", shoeId));
+    toast("Listing removed");
+    closeModal();
+  });
   document.getElementById("sell-shoe-form").addEventListener("submit", async (e) => {
     e.preventDefault();
     const soldPrice = Number(document.getElementById("sold-price").value);
@@ -628,9 +645,25 @@ function renderSettings() {
       <div class="label">${profile.name}</div>
       <div class="muted mono">${profile.role.toUpperCase()}</div>
     </div>
+
+    <h2 style="margin-top:16px;">Sales history</h2>
+    <div class="card">
+      <label for="history-date">Pick a date</label>
+      <input type="date" id="history-date" />
+      <div class="spacer"></div>
+      <button class="btn btn-outline" id="history-view-btn">View sales for this day</button>
+    </div>
+
     ${isOwner() ? `<h2 style="margin-top:16px;">Staff permissions</h2><div id="staff-list"><div class="loading-dots">Loading…</div></div>` : ""}
     <button class="btn btn-outline" id="logout-btn" style="margin-top:20px;">Log out</button>
   `;
+
+  document.getElementById("history-view-btn").addEventListener("click", () => {
+    const val = document.getElementById("history-date").value;
+    if (!val) { toast("Pick a date first"); return; }
+    const [y, m, d] = val.split("-").map(Number);
+    showSalesForDate(new Date(y, m - 1, d));
+  });
 
   document.getElementById("logout-btn").addEventListener("click", async () => {
     await signOut(auth);
