@@ -46,6 +46,8 @@ const CAPE_TYPES = [
   { key: "round", label: "Round standing", price: 400 }
 ];
 const HANDBAG_TYPES = [{ key: "total", label: "Handbags", price: null }];
+const DEFAULT_DAILY_WAGE = 300;
+const WAGE_WINDOW_DAYS = 14; // how many past days show up in the wages list / count toward "owed"
 
 // ---------- Global state ----------
 
@@ -733,48 +735,151 @@ async function loadRevenueChart() {
   });
 }
 
+// ---------- Wage day helpers ----------
+// Each wage day is a doc in "wage_entries" keyed by date string (YYYY-MM-DD),
+// so there's exactly one doc per calendar day and a day with no doc simply
+// means "not yet paid" rather than "no wage owed".
+
+function toDateKey(d) {
+  const yyyy = d.getFullYear();
+  const mm = String(d.getMonth() + 1).padStart(2, "0");
+  const dd = String(d.getDate()).padStart(2, "0");
+  return `${yyyy}-${mm}-${dd}`;
+}
+
+function dateKeyToLabel(key) {
+  const [y, m, d] = key.split("-").map(Number);
+  return new Date(y, m - 1, d).toLocaleDateString(undefined, { weekday: "short", month: "short", day: "numeric" });
+}
+
+function recentDateKeys(days, oldestFirst = false) {
+  const today = new Date();
+  today.setHours(0, 0, 0, 0);
+  const keys = [];
+  for (let i = 0; i < days; i++) {
+    const d = new Date(today);
+    d.setDate(d.getDate() - i);
+    keys.push(toDateKey(d));
+  }
+  return oldestFirst ? keys.reverse() : keys;
+}
+
 async function loadWages() {
   const box = document.getElementById("wages-card");
-  const snap = await getDocs(query(collection(db, "wage_entries"), orderBy("timestamp", "desc")));
-  let owed = 0;
-  let rows = "";
-  let count = 0;
-  snap.forEach(d => {
-    const w = d.data();
-    owed += (w.amount || 0) - (w.paidAmount || 0);
-    if (count < 10) {
-      const dateStr = w.timestamp ? w.timestamp.toDate().toLocaleDateString() : "";
-      rows += `
-        <div class="ledger-row">
-          <div class="label">${dateStr}</div>
-          <div class="mono">Ksh ${w.paidAmount || 0} / ${w.amount || 0}</div>
-        </div>`;
-      count++;
+  box.innerHTML = `<div class="loading-dots">Loading…</div>`;
+
+  const keys = recentDateKeys(WAGE_WINDOW_DAYS);
+  const snaps = await Promise.all(keys.map(k => getDoc(doc(db, "wage_entries", k))));
+  const dayData = keys.map((k, i) => {
+    const snap = snaps[i];
+    if (snap.exists()) {
+      const w = snap.data();
+      return { key: k, amountDue: w.amountDue ?? DEFAULT_DAILY_WAGE, paidAmount: w.paidAmount || 0, dayOff: !!w.dayOff };
     }
+    return { key: k, amountDue: DEFAULT_DAILY_WAGE, paidAmount: 0, dayOff: false };
   });
+
+  const owed = dayData.reduce((sum, d) => sum + (d.dayOff ? 0 : Math.max(0, d.amountDue - d.paidAmount)), 0);
+
+  const rows = dayData.map(d => {
+    let statusHtml;
+    if (d.dayOff) statusHtml = `<span class="muted mono">Day off</span>`;
+    else if (d.paidAmount >= d.amountDue) statusHtml = `<span class="mono">Ksh ${d.paidAmount} — paid</span>`;
+    else statusHtml = `<span class="mono">Ksh ${d.paidAmount} / ${d.amountDue}</span>`;
+    return `
+      <div class="ledger-row" data-wage-date="${d.key}" style="cursor:pointer;">
+        <div class="label">${dateKeyToLabel(d.key)}</div>
+        ${statusHtml}
+      </div>`;
+  }).join("");
 
   box.innerHTML = `
     <div class="alert ${owed > 0 ? "alert-danger" : "alert-good"} mono">
       ${owed > 0 ? `Ksh ${owed.toLocaleString()} owed to you` : "All caught up — nothing owed"}
     </div>
-    ${canEdit() ? `<button class="btn btn-outline btn-sm" id="log-wage-btn" style="margin-top:8px;">Log today's wage</button>` : ""}
-    <div style="margin-top:10px;">${rows || `<p class="muted">No wage entries yet.</p>`}</div>
+    ${canEdit() ? `<button class="btn btn-outline btn-sm" id="record-payment-btn" style="margin-top:8px;">Record a payment</button>` : ""}
+    <div style="margin-top:10px;">${rows}</div>
   `;
 
-  document.getElementById("log-wage-btn")?.addEventListener("click", logWage);
+  box.querySelectorAll("[data-wage-date]").forEach(row => {
+    row.addEventListener("click", () => openWageDayModal(row.dataset.wageDate));
+  });
+  document.getElementById("record-payment-btn")?.addEventListener("click", recordPayment);
 }
 
-async function logWage() {
-  const amountStr = window.prompt("How much of today's Ksh 300 wage was paid? (0-300)", "300");
-  if (amountStr === null) return;
-  const paidAmount = Math.max(0, Math.min(300, Number(amountStr) || 0));
-  await addDoc(collection(db, "wage_entries"), {
-    amount: 300,
-    paidAmount,
-    timestamp: serverTimestamp(),
-    loggedBy: currentUser.uid
+async function openWageDayModal(dateKey) {
+  const snap = await getDoc(doc(db, "wage_entries", dateKey));
+  const w = snap.exists() ? snap.data() : { amountDue: DEFAULT_DAILY_WAGE, paidAmount: 0, dayOff: false };
+  const due = w.amountDue ?? DEFAULT_DAILY_WAGE;
+
+  openModal(`
+    <div class="modal-head"><h2>${dateKeyToLabel(dateKey)}</h2>
+      <button class="modal-close" onclick="document.getElementById('modal-overlay').remove()">✕</button></div>
+    <div class="alert alert-info mono">
+      ${w.dayOff ? "Marked as day off" : `Ksh ${w.paidAmount || 0} paid of Ksh ${due} due`}
+    </div>
+    ${canEdit() ? `
+      <button class="btn btn-outline btn-sm" id="wage-set-paid-btn" style="margin-top:10px;">Set amount paid</button>
+      <button class="btn btn-outline btn-sm" id="wage-toggle-off-btn" style="margin-top:8px;">${w.dayOff ? "Unmark day off" : "Mark as day off"}</button>
+    ` : ""}
+  `);
+
+  document.getElementById("wage-set-paid-btn")?.addEventListener("click", async () => {
+    const amountStr = window.prompt(`How much was paid for ${dateKeyToLabel(dateKey)}? (0-${due})`, String(w.paidAmount || 0));
+    if (amountStr === null) return;
+    const paidAmount = Math.max(0, Math.min(due, Number(amountStr) || 0));
+    await setDoc(doc(db, "wage_entries", dateKey), {
+      date: dateKey, amountDue: due, paidAmount, dayOff: false, updatedAt: serverTimestamp(), loggedBy: currentUser.uid
+    }, { merge: true });
+    closeModal();
+    toast(`Logged Ksh ${paidAmount} paid for ${dateKeyToLabel(dateKey)}`);
+    loadWages();
   });
-  toast(paidAmount >= 300 ? "Marked as fully paid" : `Logged Ksh ${paidAmount} paid`);
+
+  document.getElementById("wage-toggle-off-btn")?.addEventListener("click", async () => {
+    await setDoc(doc(db, "wage_entries", dateKey), {
+      date: dateKey, amountDue: due, paidAmount: w.paidAmount || 0,
+      dayOff: !w.dayOff, updatedAt: serverTimestamp(), loggedBy: currentUser.uid
+    }, { merge: true });
+    closeModal();
+    loadWages();
+  });
+}
+
+async function recordPayment() {
+  const totalStr = window.prompt("Total amount received today (Ksh)? This will be applied to the oldest unpaid day(s) first.", "");
+  if (totalStr === null) return;
+  let remaining = Math.max(0, Number(totalStr) || 0);
+  if (!remaining) { toast("Enter a valid amount"); return; }
+
+  const keys = recentDateKeys(WAGE_WINDOW_DAYS, true); // oldest first
+  const snaps = await Promise.all(keys.map(k => getDoc(doc(db, "wage_entries", k))));
+  const applied = [];
+
+  for (let i = 0; i < keys.length && remaining > 0; i++) {
+    const key = keys[i];
+    const w = snaps[i].exists() ? snaps[i].data() : { amountDue: DEFAULT_DAILY_WAGE, paidAmount: 0, dayOff: false };
+    if (w.dayOff) continue;
+    const due = w.amountDue ?? DEFAULT_DAILY_WAGE;
+    const owedForDay = Math.max(0, due - (w.paidAmount || 0));
+    if (owedForDay <= 0) continue;
+
+    const toApply = Math.min(owedForDay, remaining);
+    const newPaid = (w.paidAmount || 0) + toApply;
+    await setDoc(doc(db, "wage_entries", key), {
+      date: key, amountDue: due, paidAmount: newPaid, dayOff: false, updatedAt: serverTimestamp(), loggedBy: currentUser.uid
+    }, { merge: true });
+
+    remaining -= toApply;
+    applied.push(`Ksh ${toApply} → ${dateKeyToLabel(key)}`);
+  }
+
+  if (applied.length) {
+    toast(applied.join(" · "));
+    if (remaining > 0) toast(`Ksh ${remaining} left over — no more unpaid days in the last ${WAGE_WINDOW_DAYS} days`);
+  } else {
+    toast(`No unpaid days in the last ${WAGE_WINDOW_DAYS} days to apply this to`);
+  }
   loadWages();
 }
 
