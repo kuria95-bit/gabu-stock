@@ -1086,6 +1086,30 @@ function renderSettings() {
     <h2 style="margin-top:16px;">Records</h2>
     <div class="card" id="first-tx-card"><div class="loading-dots">Loading…</div></div>
 
+    ${isOwner() ? `
+      <h2 style="margin-top:16px;">Backfill a day's records</h2>
+      <p class="muted" style="margin-top:-6px;">For days that were sold outside the app (e.g. WhatsApp orders) and never logged. Adds a backdated revenue total, expense, and/or wage-paid mark for the date you pick.</p>
+      <div class="card">
+        <label for="bf-date">Date</label>
+        <input type="date" id="bf-date" />
+
+        <label for="bf-revenue" style="margin-top:8px;">Revenue for that day (Ksh, optional)</label>
+        <input type="number" id="bf-revenue" placeholder="e.g. 2200" />
+
+        <label for="bf-exp-desc" style="margin-top:8px;">Expense for that day (optional — add one at a time)</label>
+        <input type="text" id="bf-exp-desc" placeholder="e.g. Electricity" />
+        <input type="number" id="bf-exp-amount" placeholder="Amount (Ksh)" style="margin-top:6px;" />
+
+        <label style="margin-top:10px; display:flex; align-items:center; gap:8px;">
+          <input type="checkbox" id="bf-wage-cleared" /> Mark wage fully paid for this date
+        </label>
+
+        <div class="spacer"></div>
+        <button class="btn btn-primary" id="bf-save-btn">Save for this date</button>
+        <div class="muted mono" id="bf-status" style="margin-top:8px;"></div>
+      </div>
+    ` : ""}
+
     ${isOwner() ? `<h2 style="margin-top:16px;">Staff permissions</h2><div id="staff-list"><div class="loading-dots">Loading…</div></div>` : ""}
     <button class="btn btn-outline" id="logout-btn" style="margin-top:20px;">Log out</button>
   `;
@@ -1096,6 +1120,8 @@ function renderSettings() {
     const [y, m, d] = val.split("-").map(Number);
     showSalesForDate(new Date(y, m - 1, d));
   });
+
+  document.getElementById("bf-save-btn")?.addEventListener("click", saveBackfillEntry);
 
   document.getElementById("logout-btn").addEventListener("click", async () => {
     await signOut(auth);
@@ -1121,6 +1147,60 @@ async function loadFirstTransactionDate() {
     <div class="mono">${dt ? dt.toLocaleDateString(undefined, { weekday: "long", year: "numeric", month: "short", day: "numeric" }) : "Unknown date"}</div>
     <div class="muted mono" style="margin-top:4px;">${categoryLabel(t.category, t.subtype)} · ${t.type}</div>
   `;
+}
+
+async function saveBackfillEntry() {
+  const dateVal = document.getElementById("bf-date").value;
+  if (!dateVal) { toast("Pick a date first"); return; }
+  const [y, m, d] = dateVal.split("-").map(Number);
+  const dayDate = new Date(y, m - 1, d, 12, 0, 0); // midday, avoids timezone edge cases
+  const dateKey = toDateKey(dayDate);
+
+  const revenueStr = document.getElementById("bf-revenue").value;
+  const expDesc = document.getElementById("bf-exp-desc").value.trim();
+  const expAmountStr = document.getElementById("bf-exp-amount").value;
+  const markWagePaid = document.getElementById("bf-wage-cleared").checked;
+
+  const actions = [];
+
+  if (revenueStr && Number(revenueStr) > 0) {
+    await addDoc(collection(db, "transactions"), {
+      type: "sale", category: "backfill", subtype: "lump_sum",
+      qty: 1, price: Number(revenueStr),
+      note: "Backfilled total for the day",
+      by: currentUser.uid, byName: profile.name,
+      timestamp: Timestamp.fromDate(dayDate)
+    });
+    actions.push(`Ksh ${revenueStr} revenue`);
+  }
+
+  if (expDesc && expAmountStr && Number(expAmountStr) > 0) {
+    await addDoc(collection(db, "expenses"), {
+      description: expDesc, amount: Number(expAmountStr),
+      timestamp: Timestamp.fromDate(dayDate),
+      by: currentUser.uid, byName: profile.name
+    });
+    actions.push(`Ksh ${expAmountStr} expense (${expDesc})`);
+  }
+
+  if (markWagePaid) {
+    await setDoc(doc(db, "wage_entries", dateKey), {
+      date: dateKey, amountDue: DEFAULT_DAILY_WAGE, paidAmount: DEFAULT_DAILY_WAGE,
+      dayOff: false, updatedAt: serverTimestamp(), loggedBy: currentUser.uid
+    }, { merge: true });
+    actions.push("wage marked paid");
+  }
+
+  const statusEl = document.getElementById("bf-status");
+  if (!actions.length) { toast("Nothing entered"); return; }
+
+  statusEl.textContent = `Saved for ${dateKeyToLabel(dateKey)}: ${actions.join(" · ")}`;
+  document.getElementById("bf-revenue").value = "";
+  document.getElementById("bf-exp-desc").value = "";
+  document.getElementById("bf-exp-amount").value = "";
+  document.getElementById("bf-wage-cleared").checked = false;
+  toast(`Saved ${dateKeyToLabel(dateKey)}`);
+  loadFirstTransactionDate();
 }
 
 async function loadStaffList() {
