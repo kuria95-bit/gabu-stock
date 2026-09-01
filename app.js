@@ -252,8 +252,8 @@ async function loadTodaySales() {
   });
 }
 
-async function undoSale(txId) {
-  const ok = window.confirm("Undo this sale? This puts the item back in stock and removes it from today's sales.");
+async function deleteTransaction(txId, { confirmMsg = "Delete this entry? This can't be undone.", onDone } = {}) {
+  const ok = window.confirm(confirmMsg);
   if (!ok) return;
 
   const txSnap = await getDoc(doc(db, "transactions", txId));
@@ -261,17 +261,26 @@ async function undoSale(txId) {
   const t = txSnap.data();
 
   try {
-    if (t.category === "shoe" && t.shoeId) {
-      await updateDoc(doc(db, "shoes", t.shoeId), { status: "in_stock" });
-    } else if (t.category === "capes" || t.category === "handbags") {
-      await updateDoc(doc(db, "stock", t.category), { [t.subtype]: increment(t.qty || 1) });
+    if (t.type === "sale") {
+      if (t.category === "shoe" && t.shoeId) {
+        await updateDoc(doc(db, "shoes", t.shoeId), { status: "in_stock" });
+      } else if (t.category === "capes" || t.category === "handbags") {
+        await updateDoc(doc(db, "stock", t.category), { [t.subtype]: increment(t.qty || 1) });
+      }
     }
     await deleteDoc(doc(db, "transactions", txId));
-    toast("Sale undone");
-    loadTodaySales();
+    toast("Entry deleted");
+    if (onDone) onDone();
   } catch (err) {
-    toast("Couldn't undo: " + err.message);
+    toast("Couldn't delete: " + err.message);
   }
+}
+
+async function undoSale(txId) {
+  await deleteTransaction(txId, {
+    confirmMsg: "Undo this sale? This puts the item back in stock and removes it from today's sales.",
+    onDone: loadTodaySales
+  });
 }
 
 function categoryLabel(category, subtype) {
@@ -301,6 +310,7 @@ async function showSalesForDate(dateObj) {
 
   let sales = 0, revenue = 0, restocks = 0;
   const byCategory = {};
+  const lineItems = [];
   snap.forEach(d => {
     const t = d.data();
     if (t.type === "sale") {
@@ -308,6 +318,7 @@ async function showSalesForDate(dateObj) {
       revenue += t.price || 0;
       const key = categoryLabel(t.category, t.subtype);
       byCategory[key] = (byCategory[key] || 0) + (t.qty || 1);
+      lineItems.push({ id: d.id, label: t.category === "backfill" ? "Backfilled total" : key, price: t.price || 0, note: t.note || "" });
     } else if (t.type === "restock") {
       restocks += t.qty || 1;
     }
@@ -317,13 +328,33 @@ async function showSalesForDate(dateObj) {
     `<div class="ledger-row"><div class="label">${k}</div><div class="mono">${v} sold</div></div>`
   ).join("") || `<p class="muted">No sales that day.</p>`;
 
+  const lineItemsHtml = lineItems.map(item => `
+    <div class="ledger-row">
+      <div>
+        <div class="label">${item.label}</div>
+        <div class="muted mono">Ksh ${item.price}${item.note ? " · " + item.note : ""}</div>
+      </div>
+      ${canEdit() ? `<button class="btn btn-outline btn-sm" data-del-tx="${item.id}">Delete</button>` : ""}
+    </div>
+  `).join("");
+
   openModal(`
     <div class="modal-head"><h2>${startOfDay.toLocaleDateString()}</h2>
       <button class="modal-close" onclick="document.getElementById('modal-overlay').remove()">✕</button></div>
     <div class="alert alert-good mono">Ksh ${revenue.toLocaleString()} total revenue · ${sales} items sold</div>
     ${breakdownHtml}
     <p class="muted" style="margin-top:10px;">${restocks} item(s) restocked that day.</p>
+    ${lineItems.length ? `<h3 style="margin-top:14px;">Entries</h3>${lineItemsHtml}` : ""}
   `);
+
+  document.getElementById("modal-overlay")?.querySelectorAll("[data-del-tx]").forEach(btn => {
+    btn.addEventListener("click", () => {
+      deleteTransaction(btn.dataset.delTx, {
+        confirmMsg: "Delete this entry? This can't be undone.",
+        onDone: () => { showSalesForDate(dateObj); loadWeeklySummary(); }
+      });
+    });
+  });
 }
 
 // ============================================================
