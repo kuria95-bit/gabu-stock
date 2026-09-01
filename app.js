@@ -48,6 +48,7 @@ const CAPE_TYPES = [
 const HANDBAG_TYPES = [{ key: "total", label: "Handbags", price: null }];
 const DEFAULT_DAILY_WAGE = 300;
 const WAGE_WINDOW_DAYS = 14; // how many past days show up in the wages list / count toward "owed"
+const WAGE_START_DATE = "2026-08-17"; // wages only start accruing from this date
 
 // ---------- Global state ----------
 
@@ -653,6 +654,10 @@ async function renderMoney() {
       <canvas id="revenue-chart" height="180"></canvas>
     </div>
 
+    <h3 style="margin-top:16px;">Weekly summary</h3>
+    <p class="muted" style="margin-top:-6px;">Revenue, wages, and expenses since ${dateKeyToLabel(WAGE_START_DATE)}. Tap a week to see each day.</p>
+    <div id="weekly-summary-list"><div class="loading-dots">Loading…</div></div>
+
     <h3 style="margin-top:16px;">Wages</h3>
     <div class="card" id="wages-card"><div class="loading-dots">Loading…</div></div>
 
@@ -672,6 +677,7 @@ async function renderMoney() {
 
   document.getElementById("add-expense-btn")?.addEventListener("click", addExpense);
   loadRevenueChart();
+  loadWeeklySummary();
   loadWages();
   loadExpenses();
 }
@@ -735,7 +741,134 @@ async function loadRevenueChart() {
   });
 }
 
-// ---------- Wage day helpers ----------
+// ---------- Weekly summary (revenue, wages paid, expenses — since 17/08/2026) ----------
+
+function startOfWeekMonday(d) {
+  const date = new Date(d);
+  date.setHours(0, 0, 0, 0);
+  const day = date.getDay(); // 0 = Sun, 1 = Mon, ...
+  const diff = day === 0 ? -6 : 1 - day;
+  date.setDate(date.getDate() + diff);
+  return date;
+}
+
+async function loadWeeklySummary() {
+  const box = document.getElementById("weekly-summary-list");
+  if (!box) return;
+  box.innerHTML = `<div class="loading-dots">Loading…</div>`;
+
+  const businessStart = new Date(WAGE_START_DATE + "T00:00:00");
+
+  const [salesSnap, expSnap, wageSnap] = await Promise.all([
+    getDocs(query(collection(db, "transactions"), where("type", "==", "sale"), where("timestamp", ">=", Timestamp.fromDate(businessStart)), orderBy("timestamp", "asc"))),
+    getDocs(query(collection(db, "expenses"), where("timestamp", ">=", Timestamp.fromDate(businessStart)), orderBy("timestamp", "asc"))),
+    getDocs(query(collection(db, "wage_entries"), where("date", ">=", WAGE_START_DATE), orderBy("date", "asc")))
+  ]);
+
+  const weeks = new Map(); // weekKey (Monday, YYYY-MM-DD) -> { start, end, revenue, wages, expenses, days }
+
+  function weekBucket(dateObj) {
+    const monday = startOfWeekMonday(dateObj);
+    const key = toDateKey(monday);
+    if (!weeks.has(key)) {
+      const sunday = new Date(monday);
+      sunday.setDate(sunday.getDate() + 6);
+      weeks.set(key, { start: monday, end: sunday, revenue: 0, wages: 0, expenses: 0, days: {} });
+    }
+    return weeks.get(key);
+  }
+
+  function dayBucket(wk, dateObj) {
+    const key = toDateKey(dateObj);
+    if (!wk.days[key]) wk.days[key] = { revenue: 0, wages: 0, expenses: 0 };
+    return wk.days[key];
+  }
+
+  salesSnap.forEach(d => {
+    const t = d.data();
+    if (!t.timestamp) return;
+    const dt = t.timestamp.toDate();
+    const wk = weekBucket(dt);
+    wk.revenue += t.price || 0;
+    dayBucket(wk, dt).revenue += t.price || 0;
+  });
+
+  expSnap.forEach(d => {
+    const e = d.data();
+    if (!e.timestamp) return;
+    const dt = e.timestamp.toDate();
+    const wk = weekBucket(dt);
+    wk.expenses += e.amount || 0;
+    dayBucket(wk, dt).expenses += e.amount || 0;
+  });
+
+  wageSnap.forEach(d => {
+    const w = d.data();
+    if (!w.date) return;
+    const [y, m, dd] = w.date.split("-").map(Number);
+    const dt = new Date(y, m - 1, dd);
+    const wk = weekBucket(dt);
+    wk.wages += w.paidAmount || 0;
+    dayBucket(wk, dt).wages += w.paidAmount || 0;
+  });
+
+  // Make sure every week from the start date to this week shows up, even with all zeros
+  let cursor = startOfWeekMonday(businessStart);
+  const todayMonday = startOfWeekMonday(new Date());
+  while (cursor <= todayMonday) {
+    weekBucket(new Date(cursor));
+    cursor.setDate(cursor.getDate() + 7);
+  }
+
+  const sortedKeys = [...weeks.keys()].sort().reverse(); // most recent week first
+
+  box.innerHTML = sortedKeys.map(key => {
+    const wk = weeks.get(key);
+    const label = `${wk.start.toLocaleDateString(undefined, { month: "short", day: "numeric" })} – ${wk.end.toLocaleDateString(undefined, { month: "short", day: "numeric" })}`;
+    return `
+      <div class="ledger-row" data-week-key="${key}" style="cursor:pointer; flex-direction:column; align-items:stretch; gap:4px;">
+        <div class="label">${label}</div>
+        <div class="mono muted" style="display:flex; justify-content:space-between; flex-wrap:wrap; gap:6px;">
+          <span>Revenue: Ksh ${wk.revenue.toLocaleString()}</span>
+          <span>Wages: Ksh ${wk.wages.toLocaleString()}</span>
+          <span>Expenses: Ksh ${wk.expenses.toLocaleString()}</span>
+        </div>
+      </div>`;
+  }).join("") || `<p class="muted">No records yet.</p>`;
+
+  box.querySelectorAll("[data-week-key]").forEach(row => {
+    row.addEventListener("click", () => openWeekDetailModal(weeks.get(row.dataset.weekKey)));
+  });
+}
+
+function openWeekDetailModal(wk) {
+  const today = new Date();
+  today.setHours(0, 0, 0, 0);
+  const dayRows = [];
+  for (let i = 0; i < 7; i++) {
+    const d = new Date(wk.start);
+    d.setDate(d.getDate() + i);
+    if (d > today) break;
+    const key = toDateKey(d);
+    const day = wk.days[key] || { revenue: 0, wages: 0, expenses: 0 };
+    dayRows.push(`
+      <div class="ledger-row">
+        <div class="label">${d.toLocaleDateString(undefined, { weekday: "short", month: "short", day: "numeric" })}</div>
+        <div class="mono muted" style="text-align:right;">R: ${day.revenue} · W: ${day.wages} · E: ${day.expenses}</div>
+      </div>`);
+  }
+
+  openModal(`
+    <div class="modal-head"><h2>Week of ${wk.start.toLocaleDateString(undefined, { month: "short", day: "numeric" })}</h2>
+      <button class="modal-close" onclick="document.getElementById('modal-overlay').remove()">✕</button></div>
+    <div class="alert alert-good mono">
+      Revenue: Ksh ${wk.revenue.toLocaleString()} · Wages: Ksh ${wk.wages.toLocaleString()} · Expenses: Ksh ${wk.expenses.toLocaleString()}
+    </div>
+    <div style="margin-top:10px;">${dayRows.join("")}</div>
+  `);
+}
+
+
 // Each wage day is a doc in "wage_entries" keyed by date string (YYYY-MM-DD),
 // so there's exactly one doc per calendar day and a day with no doc simply
 // means "not yet paid" rather than "no wage owed".
@@ -759,7 +892,8 @@ function recentDateKeys(days, oldestFirst = false) {
   for (let i = 0; i < days; i++) {
     const d = new Date(today);
     d.setDate(d.getDate() - i);
-    keys.push(toDateKey(d));
+    const key = toDateKey(d);
+    if (key >= WAGE_START_DATE) keys.push(key);
   }
   return oldestFirst ? keys.reverse() : keys;
 }
@@ -949,6 +1083,9 @@ function renderSettings() {
       <button class="btn btn-outline" id="history-view-btn">View sales for this day</button>
     </div>
 
+    <h2 style="margin-top:16px;">Records</h2>
+    <div class="card" id="first-tx-card"><div class="loading-dots">Loading…</div></div>
+
     ${isOwner() ? `<h2 style="margin-top:16px;">Staff permissions</h2><div id="staff-list"><div class="loading-dots">Loading…</div></div>` : ""}
     <button class="btn btn-outline" id="logout-btn" style="margin-top:20px;">Log out</button>
   `;
@@ -965,7 +1102,25 @@ function renderSettings() {
     window.location.href = "index.html";
   });
 
+  loadFirstTransactionDate();
   if (isOwner()) loadStaffList();
+}
+
+async function loadFirstTransactionDate() {
+  const box = document.getElementById("first-tx-card");
+  if (!box) return;
+  const snap = await getDocs(query(collection(db, "transactions"), orderBy("timestamp", "asc"), limit(1)));
+  if (snap.empty) {
+    box.innerHTML = `<p class="muted">No transactions logged yet.</p>`;
+    return;
+  }
+  const t = snap.docs[0].data();
+  const dt = t.timestamp ? t.timestamp.toDate() : null;
+  box.innerHTML = `
+    <div class="label">First transaction</div>
+    <div class="mono">${dt ? dt.toLocaleDateString(undefined, { weekday: "long", year: "numeric", month: "short", day: "numeric" }) : "Unknown date"}</div>
+    <div class="muted mono" style="margin-top:4px;">${categoryLabel(t.category, t.subtype)} · ${t.type}</div>
+  `;
 }
 
 async function loadStaffList() {
