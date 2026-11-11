@@ -49,6 +49,9 @@ const HANDBAG_TYPES = [{ key: "total", label: "Handbags", price: null }];
 const DEFAULT_DAILY_WAGE = 300;
 const WAGE_WINDOW_DAYS = 14; // how many past days show up in the wages list / count toward "owed"
 const WAGE_START_DATE = "2026-08-17"; // wages only start accruing from this date
+const CASH_TRACK_START = "2026-11-10"; // "Cash to send" only counts from this date (sales marked Cash/Paybill)
+
+function paymentLabel(p) { return p === "cash" ? "Cash" : p === "paybill" ? "Paybill" : ""; }
 
 // ---------- Global state ----------
 
@@ -59,6 +62,7 @@ let shoesCache = [];
 let capesStock = { normal: 0, expensive: 0, standing: 0, round: 0 };
 let handbagsStock = { total: 0 };
 let stockDate = ""; // date used for capes/handbags sales; "" = today
+let stockPayment = ""; // "cash" | "paybill" for capes/handbags sales; "" = not chosen yet
 
 const contentEl = document.getElementById("content");
 const tabbarEl = document.getElementById("tabbar");
@@ -116,7 +120,7 @@ function attachLiveListeners() {
 tabbarEl.addEventListener("click", (e) => {
   const btn = e.target.closest("button[data-tab]");
   if (!btn) return;
-  if (btn.dataset.tab !== activeTab) stockDate = ""; // always start a tab visit on today
+  if (btn.dataset.tab !== activeTab) { stockDate = ""; stockPayment = ""; } // always start a tab visit fresh
   activeTab = btn.dataset.tab;
   [...tabbarEl.children].forEach(b => b.classList.toggle("active", b === btn));
   render();
@@ -254,7 +258,7 @@ async function loadTodaySales() {
       <div class="ledger-row">
         <div>
           <div class="label">${categoryLabel(t.category, t.subtype)}</div>
-          <div class="muted mono">Ksh ${t.price || 0} · ${t.byName || "—"}</div>
+          <div class="muted mono">Ksh ${t.price || 0}${t.payment ? " · " + paymentLabel(t.payment) : ""} · ${t.byName || "—"}</div>
         </div>
         <div style="display:flex; align-items:center; gap:10px;">
           <div class="mono">${t.qty || 1}x</div>
@@ -339,7 +343,7 @@ async function showSalesForDate(dateObj) {
       revenue += t.price || 0;
       const key = categoryLabel(t.category, t.subtype);
       byCategory[key] = (byCategory[key] || 0) + (t.qty || 1);
-      lineItems.push({ id: d.id, label: t.category === "backfill" ? "Backfilled total" : key, price: t.price || 0, note: t.note || "" });
+      lineItems.push({ id: d.id, label: t.category === "backfill" ? "Backfilled total" : key, price: t.price || 0, note: [paymentLabel(t.payment), t.note || ""].filter(Boolean).join(" · ") });
     } else if (t.type === "restock") {
       restocks += t.qty || 1;
     }
@@ -506,6 +510,12 @@ function openSellShoeModal(shoeId) {
     <form id="sell-shoe-form">
       <label for="sold-price">Price you sold it for (Ksh)</label>
       <input type="number" id="sold-price" placeholder="e.g. 1600" required />
+      <label for="sold-payment" style="margin-top:8px;">How was it paid?</label>
+      <select id="sold-payment" required>
+        <option value="">Choose…</option>
+        <option value="cash">Cash (given to me)</option>
+        <option value="paybill">Paybill (paid direct)</option>
+      </select>
       <label for="sold-date" style="margin-top:8px;">Date of sale</label>
       <input type="date" id="sold-date" value="${todayKey()}" max="${todayKey()}" required />
       <div class="spacer"></div>
@@ -527,14 +537,17 @@ function openSellShoeModal(shoeId) {
     e.preventDefault();
     const soldPrice = Number(document.getElementById("sold-price").value);
     const soldDateKey = document.getElementById("sold-date").value || todayKey();
+    const payment = document.getElementById("sold-payment").value;
+    if (!payment) { toast("Choose cash or paybill"); return; }
     const ts = entryTimestamp(soldDateKey);
     await updateDoc(doc(db, "shoes", shoeId), {
       status: "sold",
       soldPrice,
       dateSold: ts,
+      paymentMethod: payment,
       soldBy: currentUser.uid
     });
-    await logTransaction({ type: "sale", category: "shoe", subtype: shoe.size, qty: 1, price: soldPrice, shoeId, timestamp: ts });
+    await logTransaction({ type: "sale", category: "shoe", subtype: shoe.size, qty: 1, price: soldPrice, shoeId, payment, timestamp: ts });
     toast(isPastDateKey(soldDateKey) ? `Sold for Ksh ${soldPrice} — saved on ${dateKeyToLabel(soldDateKey)}` : `Sold for Ksh ${soldPrice}`);
     closeModal();
   });
@@ -567,6 +580,12 @@ function renderStock() {
       <label for="stock-date">Date for these sales / restocks</label>
       <input type="date" id="stock-date" value="${stockDate || todayKey()}" max="${todayKey()}" />
       <div id="stock-date-warn"></div>
+      <label for="stock-payment" style="margin-top:8px;">Paid by (for sales)</label>
+      <select id="stock-payment">
+        <option value="">Choose…</option>
+        <option value="cash" ${stockPayment === "cash" ? "selected" : ""}>Cash (given to me)</option>
+        <option value="paybill" ${stockPayment === "paybill" ? "selected" : ""}>Paybill (paid direct)</option>
+      </select>
     </div>
 
     <h3 style="margin-top:16px;">Capes</h3>
@@ -599,6 +618,7 @@ function renderStock() {
     updateStockDateWarn();
   });
   updateStockDateWarn();
+  document.getElementById("stock-payment").addEventListener("change", (e) => { stockPayment = e.target.value; });
 }
 
 function stockRowHtml(category, subtype, label, count) {
@@ -621,6 +641,7 @@ async function handleStockAdjust(category, subtype, action) {
     if ((currentVal || 0) <= 0) { toast("Already at zero"); return; }
     const typeList = category === "capes" ? CAPE_TYPES : HANDBAG_TYPES;
     const known = typeList.find(t => t.key === subtype)?.price;
+    if (!stockPayment) { toast("Choose Cash or Paybill first (Paid by)"); return; }
     const dateKey = stockDate || todayKey();
     const past = isPastDateKey(dateKey);
     let price = window.prompt(
@@ -630,7 +651,7 @@ async function handleStockAdjust(category, subtype, action) {
     if (price === null) return;
     price = price ? Number(price) : 0;
     await updateDoc(doc(db, "stock", category), { [subtype]: increment(-1) });
-    await logTransaction({ type: "sale", category, subtype, qty: 1, price, timestamp: entryTimestamp(dateKey) });
+    await logTransaction({ type: "sale", category, subtype, qty: 1, price, payment: stockPayment, timestamp: entryTimestamp(dateKey) });
     toast(past ? `Recorded as sold on ${dateKeyToLabel(dateKey)}` : "Recorded as sold");
   } else {
     const qtyStr = window.prompt("How many are you restocking?", "1");
@@ -740,6 +761,9 @@ async function renderMoney() {
     <h3 style="margin-top:16px;">Wages</h3>
     <div class="card" id="wages-card"><div class="loading-dots">Loading…</div></div>
 
+    <h3 style="margin-top:16px;">Cash to send</h3>
+    <div class="card" id="cash-card"><div class="loading-dots">Loading…</div></div>
+
     <h3 style="margin-top:16px;">Money sent to owner</h3>
     <div class="card">
       ${canEdit() ? `
@@ -750,11 +774,11 @@ async function renderMoney() {
         <label for="send-method" style="margin-top:8px;">How it was sent</label>
         <select id="send-method">
           <option value="Paybill">Paybill</option>
-          <option value="Cash deposited, then sent">Cash deposited, then sent</option>
+          <option value="M-Pesa (direct)">M-Pesa (direct)</option>
           <option value="Other">Other</option>
         </select>
         <label for="send-note" style="margin-top:8px;">Note</label>
-        <input type="text" id="send-note" placeholder="e.g. Cash from Mon &amp; Tue, wage 300 taken" />
+        <input type="text" id="send-note" placeholder="e.g. Cash sales for the day, wage 300 taken" />
         <div class="spacer"></div>
         <button class="btn btn-primary" id="add-send-btn">Save money sent</button>
       ` : ""}
@@ -1041,6 +1065,7 @@ async function loadWages() {
     row.addEventListener("click", () => openWageDayModal(row.dataset.wageDate));
   });
   document.getElementById("record-payment-btn")?.addEventListener("click", recordPayment);
+  loadCashPosition();
 }
 
 async function openWageDayModal(dateKey) {
@@ -1119,12 +1144,60 @@ async function recordPayment() {
   loadWages();
 }
 
-// ---------- Money sent to owner (paybill / cash deposited later) ----------
+// ---------- Cash to send: cash sales - wages taken - expenses - already sent ----------
+
+async function loadCashPosition() {
+  const box = document.getElementById("cash-card");
+  if (!box) return;
+  const start = new Date(CASH_TRACK_START + "T00:00:00");
+  try {
+    const [salesSnap, expSnap, wageSnap, sentSnap] = await Promise.all([
+      getDocs(query(collection(db, "transactions"), where("type", "==", "sale"), where("timestamp", ">=", Timestamp.fromDate(start)), orderBy("timestamp", "asc"))),
+      getDocs(query(collection(db, "expenses"), where("timestamp", ">=", Timestamp.fromDate(start)), orderBy("timestamp", "asc"))),
+      getDocs(query(collection(db, "wage_entries"), where("date", ">=", CASH_TRACK_START), orderBy("date", "asc"))),
+      getDocs(query(collection(db, "sent_money"), where("timestamp", ">=", Timestamp.fromDate(start)), orderBy("timestamp", "asc")))
+    ]);
+
+    let cashSales = 0, paybillSales = 0, expenses = 0, wages = 0, sent = 0;
+    salesSnap.forEach(d => {
+      const t = d.data();
+      if (t.payment === "cash") cashSales += t.price || 0;
+      else if (t.payment === "paybill") paybillSales += t.price || 0;
+    });
+    expSnap.forEach(d => { expenses += d.data().amount || 0; });
+    wageSnap.forEach(d => { wages += d.data().paidAmount || 0; });
+    sentSnap.forEach(d => { sent += d.data().amount || 0; });
+
+    const toSend = cashSales - wages - expenses - sent;
+    const row = (label, val, sign = "") => `<div class="ledger-row"><div class="label">${label}</div><div class="mono">${sign}Ksh ${val.toLocaleString()}</div></div>`;
+
+    box.innerHTML = `
+      <div class="alert ${toSend > 0 ? "alert-danger" : "alert-good"} mono">
+        ${toSend > 0 ? `Ksh ${toSend.toLocaleString()} still to send to owner` : toSend === 0 ? "All cash sent — nothing pending" : `Sent Ksh ${Math.abs(toSend).toLocaleString()} more than the cash recorded`}
+      </div>
+      ${row("Cash sales", cashSales)}
+      ${row("Wages taken", wages, "− ")}
+      ${row("Expenses", expenses, "− ")}
+      ${row("Already sent", sent, "− ")}
+      <p class="muted" style="margin-top:8px;">Paybill sales (paid direct, nothing to send): Ksh ${paybillSales.toLocaleString()}. Counting from ${dateKeyToLabel(CASH_TRACK_START)}; only sales marked Cash or Paybill are included.</p>
+    `;
+  } catch (err) {
+    box.innerHTML = `<div class="alert alert-danger mono">Couldn't work out the cash total: ${escapeHtml(err.message)}</div>`;
+  }
+}
+
+// ---------- Money sent to owner (paybill / M-Pesa) ----------
 
 async function loadSentMoney() {
   const box = document.getElementById("sent-list");
   if (!box) return;
-  const snap = await getDocs(query(collection(db, "sent_money"), orderBy("timestamp", "desc"), limit(20)));
+  let snap;
+  try {
+    snap = await getDocs(query(collection(db, "sent_money"), orderBy("timestamp", "desc"), limit(20)));
+  } catch (err) {
+    box.innerHTML = `<div class="alert alert-danger mono">Couldn't load this section: ${escapeHtml(err.message)}. Add a Firestore rule for "sent_money".</div>`;
+    return;
+  }
   let total = 0;
   let rows = "";
   snap.forEach(d => {
@@ -1156,6 +1229,7 @@ async function loadSentMoney() {
       await deleteDoc(doc(db, "sent_money", btn.dataset.delSent));
       toast("Entry deleted");
       loadSentMoney();
+      loadCashPosition();
     });
   });
 }
@@ -1167,16 +1241,22 @@ async function addSentMoney() {
   const note = document.getElementById("send-note").value.trim();
   if (!amount || amount <= 0) { toast("Enter the amount sent"); return; }
 
-  await addDoc(collection(db, "sent_money"), {
-    amount, method, note,
-    timestamp: entryTimestamp(dateKey),
-    by: currentUser.uid,
-    byName: profile.name
-  });
+  try {
+    await addDoc(collection(db, "sent_money"), {
+      amount, method, note,
+      timestamp: entryTimestamp(dateKey),
+      by: currentUser.uid,
+      byName: profile.name
+    });
+  } catch (err) {
+    toast("Couldn't save: " + err.message);
+    return;
+  }
   document.getElementById("send-amount").value = "";
   document.getElementById("send-note").value = "";
   toast(isPastDateKey(dateKey) ? `Saved for ${dateKeyToLabel(dateKey)}` : "Saved");
   loadSentMoney();
+  loadCashPosition();
 }
 
 async function loadExpenses() {
@@ -1222,6 +1302,7 @@ async function addExpense() {
   amtEl.value = "";
   toast("Expense added");
   loadExpenses();
+  loadCashPosition();
 }
 
 // ============================================================
