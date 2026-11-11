@@ -58,6 +58,7 @@ let activeTab = "overview";
 let shoesCache = [];
 let capesStock = { normal: 0, expensive: 0, standing: 0, round: 0 };
 let handbagsStock = { total: 0 };
+let stockDate = ""; // date used for capes/handbags sales; "" = today
 
 const contentEl = document.getElementById("content");
 const tabbarEl = document.getElementById("tabbar");
@@ -115,6 +116,7 @@ function attachLiveListeners() {
 tabbarEl.addEventListener("click", (e) => {
   const btn = e.target.closest("button[data-tab]");
   if (!btn) return;
+  if (btn.dataset.tab !== activeTab) stockDate = ""; // always start a tab visit on today
   activeTab = btn.dataset.tab;
   [...tabbarEl.children].forEach(b => b.classList.toggle("active", b === btn));
   render();
@@ -158,12 +160,31 @@ function closeModal() {
 // ---------- Transaction log ----------
 
 async function logTransaction(entry) {
+  const { timestamp, ...rest } = entry;
   await addDoc(collection(db, "transactions"), {
-    ...entry,
+    ...rest,
     by: currentUser.uid,
     byName: profile.name,
-    timestamp: serverTimestamp()
+    timestamp: timestamp || serverTimestamp()
   });
+}
+
+// ---------- Backdating helpers ----------
+
+function todayKey() { return toDateKey(new Date()); }
+
+// Turns a "YYYY-MM-DD" date into the timestamp to save.
+// Today (or empty / future) -> real server time. Past day -> midday of that day.
+function entryTimestamp(dateKey) {
+  if (!dateKey || dateKey >= todayKey()) return serverTimestamp();
+  const [y, m, d] = dateKey.split("-").map(Number);
+  return Timestamp.fromDate(new Date(y, m - 1, d, 12, 0, 0));
+}
+
+function isPastDateKey(dateKey) { return !!dateKey && dateKey < todayKey(); }
+
+function escapeHtml(str) {
+  return String(str ?? "").replace(/[&<>"']/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
 }
 
 // ============================================================
@@ -485,6 +506,8 @@ function openSellShoeModal(shoeId) {
     <form id="sell-shoe-form">
       <label for="sold-price">Price you sold it for (Ksh)</label>
       <input type="number" id="sold-price" placeholder="e.g. 1600" required />
+      <label for="sold-date" style="margin-top:8px;">Date of sale</label>
+      <input type="date" id="sold-date" value="${todayKey()}" max="${todayKey()}" required />
       <div class="spacer"></div>
       <button type="submit" class="btn btn-primary">Mark as sold</button>
     </form>
@@ -503,14 +526,16 @@ function openSellShoeModal(shoeId) {
   document.getElementById("sell-shoe-form").addEventListener("submit", async (e) => {
     e.preventDefault();
     const soldPrice = Number(document.getElementById("sold-price").value);
+    const soldDateKey = document.getElementById("sold-date").value || todayKey();
+    const ts = entryTimestamp(soldDateKey);
     await updateDoc(doc(db, "shoes", shoeId), {
       status: "sold",
       soldPrice,
-      dateSold: serverTimestamp(),
+      dateSold: ts,
       soldBy: currentUser.uid
     });
-    await logTransaction({ type: "sale", category: "shoe", subtype: shoe.size, qty: 1, price: soldPrice, shoeId });
-    toast(`Sold for Ksh ${soldPrice}`);
+    await logTransaction({ type: "sale", category: "shoe", subtype: shoe.size, qty: 1, price: soldPrice, shoeId, timestamp: ts });
+    toast(isPastDateKey(soldDateKey) ? `Sold for Ksh ${soldPrice} — saved on ${dateKeyToLabel(soldDateKey)}` : `Sold for Ksh ${soldPrice}`);
     closeModal();
   });
 }
@@ -538,6 +563,12 @@ function renderStock() {
     <h1>Capes &amp; Handbags</h1>
     <p class="muted">Tap + or − to sell or restock. Every change is logged.</p>
 
+    <div class="card" style="margin-top:12px;">
+      <label for="stock-date">Date for these sales / restocks</label>
+      <input type="date" id="stock-date" value="${stockDate || todayKey()}" max="${todayKey()}" />
+      <div id="stock-date-warn"></div>
+    </div>
+
     <h3 style="margin-top:16px;">Capes</h3>
     <div id="capes-rows"></div>
 
@@ -554,6 +585,20 @@ function renderStock() {
   contentEl.querySelectorAll("[data-action]").forEach(btn => {
     btn.addEventListener("click", () => handleStockAdjust(btn.dataset.category, btn.dataset.subtype, btn.dataset.action));
   });
+
+  const stockDateEl = document.getElementById("stock-date");
+  const updateStockDateWarn = () => {
+    const warn = document.getElementById("stock-date-warn");
+    if (!warn) return;
+    warn.innerHTML = isPastDateKey(stockDate)
+      ? `<div class="alert alert-danger mono" style="margin-top:8px;">Recording for ${dateKeyToLabel(stockDate)} — change back to today when done.</div>`
+      : "";
+  };
+  stockDateEl.addEventListener("change", () => {
+    stockDate = stockDateEl.value >= todayKey() ? "" : stockDateEl.value;
+    updateStockDateWarn();
+  });
+  updateStockDateWarn();
 }
 
 function stockRowHtml(category, subtype, label, count) {
@@ -576,22 +621,25 @@ async function handleStockAdjust(category, subtype, action) {
     if ((currentVal || 0) <= 0) { toast("Already at zero"); return; }
     const typeList = category === "capes" ? CAPE_TYPES : HANDBAG_TYPES;
     const known = typeList.find(t => t.key === subtype)?.price;
+    const dateKey = stockDate || todayKey();
+    const past = isPastDateKey(dateKey);
     let price = window.prompt(
-      `Price sold for (Ksh):`,
+      past ? `Price sold for (Ksh) — recording for ${dateKeyToLabel(dateKey)}:` : `Price sold for (Ksh):`,
       known != null ? String(known) : ""
     );
     if (price === null) return;
     price = price ? Number(price) : 0;
     await updateDoc(doc(db, "stock", category), { [subtype]: increment(-1) });
-    await logTransaction({ type: "sale", category, subtype, qty: 1, price });
-    toast("Recorded as sold");
+    await logTransaction({ type: "sale", category, subtype, qty: 1, price, timestamp: entryTimestamp(dateKey) });
+    toast(past ? `Recorded as sold on ${dateKeyToLabel(dateKey)}` : "Recorded as sold");
   } else {
     const qtyStr = window.prompt("How many are you restocking?", "1");
     const qty = Number(qtyStr);
     if (!qty || qty <= 0) return;
     await updateDoc(doc(db, "stock", category), { [subtype]: increment(qty) });
-    await logTransaction({ type: "restock", category, subtype, qty });
-    toast(`Restocked +${qty}`);
+    const dateKey = stockDate || todayKey();
+    await logTransaction({ type: "restock", category, subtype, qty, timestamp: entryTimestamp(dateKey) });
+    toast(isPastDateKey(dateKey) ? `Restocked +${qty} on ${dateKeyToLabel(dateKey)}` : `Restocked +${qty}`);
   }
 }
 
@@ -692,6 +740,27 @@ async function renderMoney() {
     <h3 style="margin-top:16px;">Wages</h3>
     <div class="card" id="wages-card"><div class="loading-dots">Loading…</div></div>
 
+    <h3 style="margin-top:16px;">Money sent to owner</h3>
+    <div class="card">
+      ${canEdit() ? `
+        <label for="send-amount">Amount sent (Ksh)</label>
+        <input type="number" id="send-amount" placeholder="e.g. 2000" />
+        <label for="send-date" style="margin-top:8px;">Date sent</label>
+        <input type="date" id="send-date" value="${todayKey()}" max="${todayKey()}" />
+        <label for="send-method" style="margin-top:8px;">How it was sent</label>
+        <select id="send-method">
+          <option value="Paybill">Paybill</option>
+          <option value="Cash deposited, then sent">Cash deposited, then sent</option>
+          <option value="Other">Other</option>
+        </select>
+        <label for="send-note" style="margin-top:8px;">Note</label>
+        <input type="text" id="send-note" placeholder="e.g. Cash from Mon &amp; Tue, wage 300 taken" />
+        <div class="spacer"></div>
+        <button class="btn btn-primary" id="add-send-btn">Save money sent</button>
+      ` : ""}
+    </div>
+    <div id="sent-list"><div class="loading-dots">Loading…</div></div>
+
     <h3 style="margin-top:16px;">Expenses</h3>
     <div class="card">
       ${canEdit() ? `
@@ -707,6 +776,8 @@ async function renderMoney() {
   `;
 
   document.getElementById("add-expense-btn")?.addEventListener("click", addExpense);
+  document.getElementById("add-send-btn")?.addEventListener("click", addSentMoney);
+  loadSentMoney();
   loadRevenueChart();
   loadWeeklySummary();
   loadWages();
@@ -1046,6 +1117,66 @@ async function recordPayment() {
     toast(`No unpaid days in the last ${WAGE_WINDOW_DAYS} days to apply this to`);
   }
   loadWages();
+}
+
+// ---------- Money sent to owner (paybill / cash deposited later) ----------
+
+async function loadSentMoney() {
+  const box = document.getElementById("sent-list");
+  if (!box) return;
+  const snap = await getDocs(query(collection(db, "sent_money"), orderBy("timestamp", "desc"), limit(20)));
+  let total = 0;
+  let rows = "";
+  snap.forEach(d => {
+    const s = d.data();
+    total += s.amount || 0;
+    const dateStr = s.timestamp ? s.timestamp.toDate().toLocaleDateString() : "";
+    rows += `
+      <div class="ledger-row">
+        <div>
+          <div class="label">${escapeHtml(s.method || "Sent")}</div>
+          <div class="muted mono">${dateStr} · ${escapeHtml(s.byName || "—")}</div>
+          ${s.note ? `<div class="muted" style="margin-top:2px;">${escapeHtml(s.note)}</div>` : ""}
+        </div>
+        <div style="display:flex; align-items:center; gap:10px;">
+          <div class="mono">Ksh ${(s.amount || 0).toLocaleString()}</div>
+          ${canEdit() ? `<button class="btn btn-outline btn-sm" data-del-sent="${d.id}">Delete</button>` : ""}
+        </div>
+      </div>`;
+  });
+
+  box.innerHTML = `
+    <div class="alert alert-info mono">Ksh ${total.toLocaleString()} sent (last 20 entries)</div>
+    ${rows || `<p class="muted">Nothing recorded as sent yet.</p>`}
+  `;
+
+  box.querySelectorAll("[data-del-sent]").forEach(btn => {
+    btn.addEventListener("click", async () => {
+      if (!window.confirm("Delete this entry? This can't be undone.")) return;
+      await deleteDoc(doc(db, "sent_money", btn.dataset.delSent));
+      toast("Entry deleted");
+      loadSentMoney();
+    });
+  });
+}
+
+async function addSentMoney() {
+  const amount = Number(document.getElementById("send-amount").value);
+  const dateKey = document.getElementById("send-date").value || todayKey();
+  const method = document.getElementById("send-method").value;
+  const note = document.getElementById("send-note").value.trim();
+  if (!amount || amount <= 0) { toast("Enter the amount sent"); return; }
+
+  await addDoc(collection(db, "sent_money"), {
+    amount, method, note,
+    timestamp: entryTimestamp(dateKey),
+    by: currentUser.uid,
+    byName: profile.name
+  });
+  document.getElementById("send-amount").value = "";
+  document.getElementById("send-note").value = "";
+  toast(isPastDateKey(dateKey) ? `Saved for ${dateKeyToLabel(dateKey)}` : "Saved");
+  loadSentMoney();
 }
 
 async function loadExpenses() {
